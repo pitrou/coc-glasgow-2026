@@ -1,0 +1,49 @@
+---
+title: "6 years of fuzzing Arrow and Parquet C++"
+author: "Antoine Pitrou"
+format:
+  revealjs:
+    slide-number: true
+    #center-title-slide: false
+---
+
+## Who the author is
+
+- Contributor to Apache Arrow since 2018
+- Apache Arrow and Parquet committer and PMC member
+- ASF member since 2026
+- CPython core developer (active ~2008-2017)
+
+::: {.notes}
+Speaker notes go here.
+:::
+
+## Why give this talk
+
+- Fuzzing is a useful software quality technique
+- Both widely-used and little-used
+  - Python, etc. [list projects]
+  - Most OSS projects don't use it
+  - Most developers wouldn't know how to set it up
+- I have set up fuzzing for Arrow C++ in 2018 and been its main maintainer ever since
+  - Developing most improvements and additions
+  - The one who usually fixes issues found by fuzzing
+
+## Why I got interested in fuzzing
+
+:::incremental
+- My experience on CPython gave me a deep appreciation for software quality and maintenance
+  - High software quality through detailed human code reviews and extensive unit testing
+  - Still, the massive C codebase of CPython regularly turned out to hide
+    latent bugs and potential crashes.
+  - An appreciation that a widely-used code base
+    - tends to be used in very unexpected ways
+    - are attractive targets for attacks and exploitation
+
+- I'm one of the main maintainers of the Arrow C++ codebase.
+  In my daily routine I apply my learnings from CPython days.
+
+::: {.notes}
+Speaker notes go here.
+:::
+
