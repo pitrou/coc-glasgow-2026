@@ -12,7 +12,7 @@ format:
 - Contributor to Apache Arrow since 2018
 - Apache Arrow and Parquet committer and PMC member
 - ASF member since 2026
-- CPython core developer (active ~2008-2017)
+- CPython core developer
 
 ::: {.notes}
 Speaker notes go here.
@@ -31,19 +31,102 @@ Speaker notes go here.
 
 ## Why I got interested in fuzzing
 
-:::incremental
-- My experience on CPython gave me a deep appreciation for software quality and maintenance
-  - High software quality through detailed human code reviews and extensive unit testing
-  - Still, the massive C codebase of CPython regularly turned out to hide
-    latent bugs and potential crashes.
-  - An appreciation that a widely-used code base
-    - tends to be used in very unexpected ways
-    - are attractive targets for attacks and exploitation
+- Being a CPython contributor has been a foundational experience
+  - Large, high quality, mixed C and Python codebase
+  - Detailed human code reviews and extensive unit testing
+  - Still, we would regular find latent bugs and potential crashes
 
-- I'm one of the main maintainers of the Arrow C++ codebase.
-  In my daily routine I apply my learnings from CPython days.
+. . .
+
+- An appreciation that a widely-used code base
+  - tends to be used in very unexpected ways
+  - are attractive targets for attacks and exploitation
+  - any situation that you don't plan and test for can potentially hide an issue
+
+. . .
+
+- As one of the main maintainers of the Arrow C++ codebase, I'm applying my learnings from CPython days.
 
 ::: {.notes}
-Speaker notes go here.
+I've been active on CPython 2008-2017.
+I'm still the 8th top-most CPython contributor in number of commits.
+I've spent a lot of time investigating issues and fixing bugs.
 :::
 
+## Why fuzz C/C++ projects
+
+- C/C++ are low-level languages with many pitfalls.
+  - Dereferencing null pointers
+  - Stray pointers and references (use-after-free)
+  - Out-of-bound accesses
+  - Integer overflow is silent unless you explicitly test for it
+
+. . .
+
+- Many of these issues are categorized "Undefined Behavior" (UB):
+  a C/C++ language concept that means that compiled code need not care about them,
+  and can assume it never happens.
+
+. . .
+
+- C/C++ codebases often have an emphasis on performance, encouraging unsafe constructs.
+
+. . .
+
+- Safe constructs are often more verbose and come less naturally.
+
+## Memory ownership in C/C++
+
+- When is it safe to access an object that lives in memory?
+  - If passed by value: ✔️ always
+  - If passed using an owning pointer (`unique_ptr`, `shared_ptr`): ✔️ always
+  - Otherwise: *who knows?* it's contextual
+    - raw pointer: 💣 potentially unsafe
+    - raw reference: 💣 potentially unsafe
+    - `this`: 💣 potentially unsafe (except in constructor & destructor)
+
+. . .
+
+- Straight-line synchronous code can seem easy, but multi-threaded or async programming
+  makes this a hairy problem (especially on error).
+    - even `this` can suddenly become invalid
+
+. . .
+
+- The safe constructs (`shared_ptr`, `enable_shared_from_this`, `weak_ptr`)
+  require more typing, more boilerplate, and are generally less easy to use.
+
+## Signed integer overflow in C/C++
+
+- At the machine level, signed integer overflow follows the rules of 2's complement
+  arithmetic.
+
+- But the C and C++ standards committees have decreed that signed integer overflow is UB.
+
+**This doesn't work!** Many compilers will optimize out the `end_offset < start` check
+because the C or C++ standard allows them to assume it never succeeds.
+
+```c++
+std::optional<int> compute_end_offset(int offset, int length) {
+  auto end_offset = offset + length - 1;
+  if (end_offset < offset)
+    return std::nullopt;  // integer overflow detected via 2's complement arithmetic?
+  return end_offset;
+}
+```
+
+This works... *assuming `length` is positive* (if not guaranteed, check for it!).
+
+```c++
+std::optional<int> compute_end_offset(int offset, int length) {
+  if (offset > std::numeric_limits<int>::max() - length)
+    return std::nullopt;  // integer overflow detected by pre-validation
+  return offset + length - 1;
+}
+```
+
+* Why/when this matters? For example when computing the size of a buffer allocation.
+
+::: {.notes}
+A particularly egregious example of potential issue.
+:::
