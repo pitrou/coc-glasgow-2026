@@ -7,12 +7,15 @@ format:
     #center-title-slide: false
 ---
 
-## Who the author is
+# Introduction
+
+## Author presentation
 
 - Contributor to Apache Arrow since 2018
 - Apache Arrow and Parquet committer and PMC member
 - ASF member since 2026
-- CPython core developer (active ~2008-2017)
+- CPython core developer
+- Technical director at [QuantStack](https://quantstack.net/)
 
 ::: {.notes}
 Speaker notes go here.
@@ -22,7 +25,7 @@ Speaker notes go here.
 
 - Fuzzing is a useful software quality technique
 - Both widely-used and little-used
-  - Python, etc. [list projects]
+  - Python, Angular, Apache HTTPd, OpenSSL, OpenSSH, etc.
   - Most OSS projects don't use it
   - Most developers wouldn't know how to set it up
 - I have set up fuzzing for Arrow C++ in 2018 and been its main maintainer ever since
@@ -31,19 +34,449 @@ Speaker notes go here.
 
 ## Why I got interested in fuzzing
 
-:::incremental
-- My experience on CPython gave me a deep appreciation for software quality and maintenance
-  - High software quality through detailed human code reviews and extensive unit testing
-  - Still, the massive C codebase of CPython regularly turned out to hide
-    latent bugs and potential crashes.
-  - An appreciation that a widely-used code base
-    - tends to be used in very unexpected ways
-    - are attractive targets for attacks and exploitation
+- Being a CPython contributor has been a foundational experience
+  - Large, high quality, mixed C and Python codebase
+  - Detailed human code reviews and extensive unit testing
+  - Still, we would regular find latent bugs and potential crashes
 
-- I'm one of the main maintainers of the Arrow C++ codebase.
-  In my daily routine I apply my learnings from CPython days.
+. . .
+
+- An appreciation that a widely-used code base
+  - tends to be used in very unexpected ways
+  - are attractive targets for attacks and exploitation
+  - any situation that you don't plan and test for can potentially hide an issue
+
+. . .
+
+- As one of the main maintainers of the Arrow C++ codebase, I'm applying my learnings from CPython days.
 
 ::: {.notes}
-Speaker notes go here.
+I've been active on CPython 2008-2017.
+I'm still the 8th top-most CPython contributor in number of commits.
+I've spent a lot of time investigating issues and fixing bugs.
 :::
 
+# Fuzzing
+
+## What is fuzzing, 1: unit testing
+
+- Human-written inputs and/or parametrization: test cases are curated by a human
+  reasoning about the code's intended purpose.
+
+. . .
+
+- Inputs tend to be "reasonable", they make sense to the person writing them,
+  even when testing for errors.
+
+. . .
+
+- For a developer, it is not intuitive to think about pathological cases
+  (but for an attacker, it can be).
+
+. . .
+
+- Unit test suites need to be deterministic, for the sake of reproducibility
+  (any exceptions to this?).
+
+## What is fuzzing, 2: fuzzing
+
+- Fuzzing is a machine-driven process than generates random inputs to a function
+  under test.
+
+. . .
+
+- Fuzzing is not human-supervised, but it needs an oracle: the fuzzer must know
+  whether an input led to misbehavior.
+  - The crudest oracle: the process crashed/panicked/etc.!
+  - Other oracles possible, such as idempotency or reprocity (for example:
+    encode-then-decode roundtrip).
+
+. . .
+
+- Generation is stochastic: inputs are different most of the time.
+
+. . .
+
+- Generation uses heuristics to try to find interesting inputs: those that
+  uncover a bug or a piece of pathological behavior.
+
+. . .
+
+- The inputs generated might be "reasonable", but they do not need to.
+  The most interesting ones are usually not!
+
+## How efficient is fuzzing?
+
+- On any non-trivial function, the search space is huge (virtually infinite)!
+
+. . .
+
+- Countless unsuccessful attempts are needed before finding bugs.
+  - Often the first bugs come quickly, then it may take days... months...
+
+. . .
+
+- Fuzzing is <small>usually</small> iterative: mutate past inputs, with an emphasis on the
+  "interesting" ones.
+  - *What is an interesting input?* Bugs, but not only!
+
+. . .
+
+- Fuzzing is <small>usually</small> stateful: record past knowledge to avoid starting a from
+  blank slate every time.
+
+. . .
+
+- Fuzzing benefits *massively* from function-specific heuristics for input selection...
+  which need maintenance to stay relevant.
+
+## Fuzzing "vs." unit testing
+
+::: {.list-table}
+- - Unit testing
+  - Fuzzing
+
+- - Human-written inputs and/or parametrization
+  - Machine-generated inputs
+
+- - Emphasize "reasonable" inputs (even error cases)
+  - Accidentally produces "pathological" inputs... by design
+
+- - Deterministic (ideally, otherwise a bug)
+  - Stochastic by design
+
+- - Stateless
+  - Stateful to avoid searching from scratch every time
+
+- - Easy to set up (wide-spread, mature tooling, well-known best practices)
+  - Difficult to set up
+
+- - Finds bugs immediately ⇒ can synchronously block PRs
+  - Can take a lot of time (potentially infinite)
+    ⇒ bugs often found long after merging
+
+- - 100% coverage a (theoretical) goal
+  - Opportunistic: only fuzz the most sensitive code paths
+
+- - *Needs maintenance to stay relevant*
+  - *Needs maintenance to stay relevant*
+:::
+
+[⇒ The two techniques are complementary!]{.mark}
+
+
+## What about generative AI?
+
+- "But unit tests can be written by a stochastic machine" (a LLM)
+
+- A LLM mimicks human reasoning and human competence <small>(often not very well)</small> \
+  ⇒ LLM-written unit tests have the same limitations as human-written unit tests
+    <small>(with their own problems on top)</small>
+
+
+## Why fuzz C/C++ projects
+
+- C/C++ are low-level languages with many pitfalls.
+  - Dereferencing null pointers
+  - Stray pointers and references (use-after-free)
+  - Out-of-bound accesses
+  - Integer overflow is silent unless you explicitly test for it
+
+. . .
+
+- Many of these issues are categorized "Undefined Behavior" (UB):
+  a C/C++ language concept that means that compiled code need not care about them,
+  and can assume it never happens.
+
+. . .
+
+- C/C++ codebases often have an emphasis on performance, encouraging unsafe constructs.
+
+. . .
+
+- **Safe constructs are most of the time more verbose and come less naturally.**
+
+## C/C++ trap: memory lifetime
+
+- When is it safe to access an object that lives in memory?
+  - If passed by value: ✔️ always
+  - If passed using an owning pointer (`unique_ptr`, `shared_ptr`): ✔️ always
+  - Otherwise: *who knows?* it's contextual
+    - raw pointer: 💣 potentially unsafe
+    - raw reference: 💣 potentially unsafe
+    - `this`: 💣 potentially unsafe (except in constructor & destructor)
+
+. . .
+
+- Straight-line synchronous code can seem easy, but multi-threaded or async programming
+  makes this a hairy problem (especially on error).
+    - even `this` can suddenly become invalid
+
+. . .
+
+- The safe constructs (`shared_ptr`, `enable_shared_from_this`, `weak_ptr`)
+  require more typing, more boilerplate, and are generally less easy to use.
+
+## C/C++ trap: signed integer overflow
+
+- At the machine level, signed integer overflow follows the rules of 2's complement
+  arithmetic.
+
+- But the C and C++ standards committees have decreed that signed integer overflow is UB.
+
+**This doesn't work!** Many compilers will optimize out the `end_offset < start` check
+because the C or C++ standard allows them to assume it never succeeds.
+
+```c++
+std::optional<int> compute_end_offset(int offset, int length) {
+  auto end_offset = offset + length - 1;
+  if (end_offset < offset)
+    return std::nullopt;  // integer overflow detected via 2's complement arithmetic?
+  return end_offset;
+}
+```
+
+This works... *assuming `length` is positive* (if not guaranteed, check for it!).
+
+```c++
+std::optional<int> compute_end_offset(int offset, int length) {
+  if (offset > std::numeric_limits<int>::max() - length)
+    return std::nullopt;  // integer overflow detected by pre-validation
+  return offset + length - 1;
+}
+```
+
+* Why/when this matters? For example when computing the size of a buffer allocation.
+
+::: {.notes}
+A particularly egregious example of potential issue.
+:::
+
+## General needs for setting up fuzzing
+
+- Summary of required items:
+  - An input generator that generates random inputs for a function under test
+  - Some feedback from the executed function to guide input generation
+  - Orchestration to handle persistent state (past knowledge), alert about found
+    issues
+
+- You can try to do all this by yourself, or use off-the-shelf facilities.
+
+- Enter OSS-Fuzz.
+
+# OSS-Fuzz
+
+## Overview
+
+- A Google-initiated and Google-hosted project that provides fuzzing infrastructure
+  for selected open source projects (since 2016?).
+
+. . .
+
+- Runs fuzzing continuously on Google infrastructure for the configured projects.
+
+. . .
+
+- Supports (at least) C/C++, Go, JavaScript, JVM-based languages, Python,
+  Ruby, Rust, Swift.
+
+. . .
+
+- Based on various OSS building blocks:
+  - Fuzzing engines (for C/C++): libFuzzer, AFL++, Honggfuzz, Centipede
+  - Orchestration: [ClusterFuzz](https://github.com/google/clusterfuzz),
+    also a Google project.
+
+. . .
+
+- Details at [https://google.github.io/oss-fuzz/](https://google.github.io/oss-fuzz/).
+
+## Caveats
+
+- Project approval is opaque.
+
+  > To be accepted to OSS-Fuzz, an open-source project
+    must have a significant user base and/or be critical to the global IT
+    infrastructure.
+
+  (you could set up ClusterFuzz or [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/)
+   on your own infrastructure)
+
+  [TODO find out if any project was rejected]{.mark}
+
+- Project governance is unclear.
+
+- Maintenance status is unclear (is Google still engaged?).
+
+- Some tooling a bit clunky.
+
+- Not much interaction between OSS-Fuzz maintainers and project authors.
+
+*(if you are a OSS-Fuzz maintainer and this doesn't feel right, please tell me)*
+
+## Statistics
+
+::: {.absolute left=0}
+::: {.list-table}
+OSS-Fuzz projects by language (as of 22-09-2026)
+
+- - Language
+  - Number of projects
+
+- - C/C++
+  - 592
+
+- - Go
+  - 150
+
+- - JavaScript
+  - 27
+
+- - JVM-based
+  - 231
+
+- - Python
+  - 278
+
+- - Ruby
+  - 2
+
+- - Rust
+  - 89
+
+- - Swift
+  - 3
+:::
+:::
+
+## Setting up a project
+
+- Executive summary: 3 files required in the OSS-Fuzz repository
+  - `project.yaml`: (short) metadata about the project
+  - `Dockerfile`: environment in which the project is built for fuzzing
+  - `build.sh`: build script for the project
+
+- The Docker environment uses custom OSS-Fuzz base images with wrapper scripts
+  for building the project.
+
+- Please read the fine docs: ["Setting up a new project"](https://google.github.io/oss-fuzz/getting-started/new-project-guide/)
+
+## How C/C++ projects get built
+
+- The project will be built with the following features enabled:
+  - Code coverage (to guide random generation)
+  - Address Sanitizer and/or Undefined Behavior Sanitizer (for more thorough
+    bug detection) \
+    ⇒ recommend to have a ASan / UBSan build and tests on CI already.
+
+. . .
+
+- The project must configure some *fuzz targets* (one per function under test).
+  - A fuzz target is an executable made by linking the fuzzing engine (e.g. `libFuzzer`)
+    with the code you want to fuzz.
+
+  - The fuzzing engine defines its own `main` function that exposes a CLI for fuzzing.
+    It calls into a predefined entry point each time it wants to execute the function
+    under test.
+
+    ```c
+    // (from libFuzzer documentation)
+    extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+      DoSomethingInterestingWithMyAPI(Data, Size);
+      return 0;
+    }
+    ```
+
+. . .
+
+- Project executable should be linked statically, including non-system dependencies.
+  - Non-system dependencies **should be built using the same setup**
+    (avoid using non-instrumented upstream binaries).
+
+
+. . .
+
+- Demo. [TODO prepare demo executable on laptop]{.mark}
+
+## How OSS-Fuzz reports issues
+
+- When an issue is detected while fuzzing, project maintainers are privately notified
+  by e-mail.
+
+- Issue details can be browsed on a dedicated issue tracker with restricted access;
+  reproducers can be downloaded for local investigation.
+  - Just feed the reproducer to the corresponding fuzz target, and use your tools
+    of choice (such as GDB).
+  - A helper script allows reproducing against the exact fuzzing environment through
+    Docker.
+
+- If you push a fix to your codebase, later OSS-Fuzz builds of your project
+  (presumably the day after) will pick it up the and detect that the issue cannot
+  be reproduced anymore; the issue will then be closed.
+
+## How to help OSS-Fuzz find issues
+
+- OSS-Fuzz uses generic fuzzing engines (libFuzzer, etc.). It does not know anything
+  about your code's semantics or expectations.
+  - A few basic configuration options are offered, such as max input size.
+
+. . .
+
+- It is critical to help the fuzzing engine generate potentially interesting inputs:
+
+  1. By defining a seed corpus: a ZIP file of payloads that serve as a
+     starting point for input generation.
+     - Inputs do not have to be "valid" for your function.
+     - Be sure to include all input features that your function supports.
+     - A seed corpus can be static or generated during build.
+
+  2. By defining a dictionary: a list of binary fragments that are combined to
+     produce inputs for your function.
+
+. . .
+
+- (Why *seed* corpus? Because fuzz targets accrue their own corpus of interesting payloads
+  when they are ran)
+
+# Fuzzing Arrow C++
+
+## Fuzz targets
+
+- A fuzz target is an executable that combines the fuzzing engine and the function
+  under test.
+
+- Arrow C++ defines fuzz targets for these components:
+  * Arrow IPC stream and file readers
+  * Parquet file reader
+  * Parquet data encoder/decoder
+  * CSV file reader
+
+- Components selected based on:
+  * The fact that they may receive untrusted input
+  * Their criticity for the project
+  * Their assumed usage (are they widely used?)
+  * Their complexity and therefore potential fragility
+
+## Build setup
+
+- On the Arrow C++ side:
+  - A CMake option `ARROW_FUZZING` to enable fuzz targets and utilities
+  - Target definitions for fuzz targets and utilities that generate the seed corpuses.
+
+- On the OSS-Fuzz side:
+  - `Dockerfile` downloads fresh Boost
+  - `build.sh`
+    1. downloads and builds OpenSSL from source
+    2. compiles Arrow C++
+    3. generates the seed corpuses
+
+[TODO refine/remove this]{.mark}
+
+## Continuous Integration
+
+- Fuzz-related builds on our mainline CI.
+
+  - A Docker-based build replicating the OSS-Fuzz build.
+
+  - A ASan/UBSan-enabled build that checks for regressions against all OSS-Fuzz
+    issue reproducers (+ runs the regular test suite).
