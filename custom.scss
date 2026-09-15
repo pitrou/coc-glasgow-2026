@@ -1,0 +1,16 @@
+/*-- scss:rules --*/
+
+.reveal .slide-logo {
+  max-height: 20% !important;
+  // bottom: -2px;
+  // right: 10px;
+  // width: 300px;
+}
+
+.reveal .slide-number {
+  font-size: 25px;
+}
+
+.reveal.has-logo .slide-number {
+  font-size: 25px;
+}
